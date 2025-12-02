@@ -7,6 +7,7 @@ from utils import success_response, error_response, not_found, bad_request
 from services import AIService
 from services.task_manager import task_manager, generate_descriptions_task, generate_images_task
 import json
+import traceback
 from datetime import datetime
 
 project_bp = Blueprint('projects', __name__, url_prefix='/api/projects')
@@ -48,6 +49,8 @@ def create_project():
     {
         "creation_type": "idea|outline|descriptions",
         "idea_prompt": "...",  # required for idea type
+        "outline_text": "...",  # required for outline type
+        "description_text": "...",  # required for descriptions type
         "template_id": "optional"
     }
     """
@@ -66,6 +69,8 @@ def create_project():
         project = Project(
             creation_type=creation_type,
             idea_prompt=data.get('idea_prompt'),
+            outline_text=data.get('outline_text'),
+            description_text=data.get('description_text'),
             status='DRAFT'
         )
         
@@ -80,6 +85,9 @@ def create_project():
     
     except Exception as e:
         db.session.rollback()
+        error_trace = traceback.format_exc()
+        print(f"[ERROR] create_project failed: {str(e)}")
+        print(error_trace)
         return error_response('SERVER_ERROR', str(e), 500)
 
 
@@ -178,10 +186,12 @@ def generate_outline(project_id):
     """
     POST /api/projects/{project_id}/generate/outline - Generate outline
     
-    Request body:
+    For 'idea' type: Generate outline from idea_prompt
+    For 'outline' type: Parse outline_text into structured format
+    
+    Request body (optional):
     {
-        "idea_prompt": "...",
-        "outline_format": "simple|part_based|auto"
+        "idea_prompt": "...",  # for idea type
     }
     """
     try:
@@ -190,12 +200,6 @@ def generate_outline(project_id):
         if not project:
             return not_found('Project')
         
-        data = request.get_json()
-        idea_prompt = data.get('idea_prompt') or project.idea_prompt
-        
-        if not idea_prompt:
-            return bad_request("idea_prompt is required")
-        
         # Initialize AI service
         from flask import current_app
         ai_service = AIService(
@@ -203,8 +207,28 @@ def generate_outline(project_id):
             current_app.config['GOOGLE_API_BASE']
         )
         
-        # Generate outline
-        outline = ai_service.generate_outline(idea_prompt)
+        # 根据项目类型选择不同的处理方式
+        if project.creation_type == 'outline':
+            # 从大纲生成：解析用户输入的大纲文本
+            if not project.outline_text:
+                return bad_request("outline_text is required for outline type project")
+            
+            # Parse outline text into structured format
+            outline = ai_service.parse_outline_text(project.outline_text)
+        elif project.creation_type == 'descriptions':
+            # 从描述生成：这个类型应该使用专门的端点
+            return bad_request("Use /generate/from-description endpoint for descriptions type")
+        else:
+            # 一句话生成：从idea生成大纲
+            data = request.get_json() or {}
+            idea_prompt = data.get('idea_prompt') or project.idea_prompt
+            
+            if not idea_prompt:
+                return bad_request("idea_prompt is required")
+            
+            # Generate outline from idea
+            outline = ai_service.generate_outline(idea_prompt)
+            project.idea_prompt = idea_prompt
         
         # Flatten outline to pages
         pages_data = ai_service.flatten_outline(outline)
@@ -231,10 +255,11 @@ def generate_outline(project_id):
         
         # Update project status
         project.status = 'OUTLINE_GENERATED'
-        project.idea_prompt = idea_prompt
         project.updated_at = datetime.utcnow()
         
         db.session.commit()
+        
+        print(f"[INFO] 大纲生成完成: 项目 {project_id}, 创建了 {len(pages_list)} 个页面")
         
         # Return pages
         return success_response({
@@ -243,6 +268,120 @@ def generate_outline(project_id):
     
     except Exception as e:
         db.session.rollback()
+        return error_response('AI_SERVICE_ERROR', str(e), 503)
+
+
+@project_bp.route('/<project_id>/generate/from-description', methods=['POST'])
+def generate_from_description(project_id):
+    """
+    POST /api/projects/{project_id}/generate/from-description - Generate outline and page descriptions from description text
+    
+    This endpoint:
+    1. Parses the description_text to extract outline structure
+    2. Splits the description_text into individual page descriptions
+    3. Creates pages with both outline and description content filled
+    4. Sets project status to DESCRIPTIONS_GENERATED
+    
+    Request body (optional):
+    {
+        "description_text": "...",  # if not provided, uses project.description_text
+    }
+    """
+    try:
+        project = Project.query.get(project_id)
+        
+        if not project:
+            return not_found('Project')
+        
+        if project.creation_type != 'descriptions':
+            return bad_request("This endpoint is only for descriptions type projects")
+        
+        # Get description text
+        data = request.get_json() or {}
+        description_text = data.get('description_text') or project.description_text
+        
+        if not description_text:
+            return bad_request("description_text is required")
+        
+        project.description_text = description_text
+        
+        # Initialize AI service
+        from flask import current_app
+        ai_service = AIService(
+            current_app.config['GOOGLE_API_KEY'],
+            current_app.config['GOOGLE_API_BASE']
+        )
+        
+        print(f"[INFO] 开始从描述生成大纲和页面描述: 项目 {project_id}")
+        
+        # Step 1: Parse description to outline
+        print(f"[INFO] Step 1: 解析描述文本到大纲结构...")
+        outline = ai_service.parse_description_to_outline(description_text)
+        print(f"[INFO] 大纲解析完成，共 {len(ai_service.flatten_outline(outline))} 页")
+        
+        # Step 2: Split description into page descriptions
+        print(f"[INFO] Step 2: 切分描述文本到每页描述...")
+        page_descriptions = ai_service.parse_description_to_page_descriptions(description_text, outline)
+        print(f"[INFO] 描述切分完成，共 {len(page_descriptions)} 页")
+        
+        # Step 3: Flatten outline to pages
+        pages_data = ai_service.flatten_outline(outline)
+        
+        if len(pages_data) != len(page_descriptions):
+            print(f"[WARNING] 页面数量不匹配: 大纲 {len(pages_data)} 页, 描述 {len(page_descriptions)} 页")
+            # 取较小的数量，避免索引错误
+            min_count = min(len(pages_data), len(page_descriptions))
+            pages_data = pages_data[:min_count]
+            page_descriptions = page_descriptions[:min_count]
+        
+        # Step 4: Delete existing pages
+        Page.query.filter_by(project_id=project_id).delete()
+        
+        # Step 5: Create pages with both outline and description
+        pages_list = []
+        for i, (page_data, page_desc) in enumerate(zip(pages_data, page_descriptions)):
+            page = Page(
+                project_id=project_id,
+                order_index=i,
+                part=page_data.get('part'),
+                status='DESCRIPTION_GENERATED'  # 直接设置为已生成描述
+            )
+            
+            # Set outline content
+            page.set_outline_content({
+                'title': page_data.get('title'),
+                'points': page_data.get('points', [])
+            })
+            
+            # Set description content
+            desc_content = {
+                "text": page_desc,
+                "generated_at": datetime.utcnow().isoformat()
+            }
+            page.set_description_content(desc_content)
+            
+            db.session.add(page)
+            pages_list.append(page)
+        
+        # Update project status
+        project.status = 'DESCRIPTIONS_GENERATED'
+        project.updated_at = datetime.utcnow()
+        
+        db.session.commit()
+        
+        print(f"[INFO] 从描述生成完成: 项目 {project_id}, 创建了 {len(pages_list)} 个页面，已填充大纲和描述")
+        
+        # Return pages
+        return success_response({
+            'pages': [page.to_dict() for page in pages_list],
+            'status': 'DESCRIPTIONS_GENERATED'
+        })
+    
+    except Exception as e:
+        db.session.rollback()
+        error_trace = traceback.format_exc()
+        print(f"[ERROR] generate_from_description failed: {str(e)}")
+        print(error_trace)
         return error_response('AI_SERVICE_ERROR', str(e), 503)
 
 

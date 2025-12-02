@@ -14,6 +14,8 @@ class Project(db.Model):
     
     id = db.Column(db.String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     idea_prompt = db.Column(db.Text, nullable=True)
+    outline_text = db.Column(db.Text, nullable=True)  # 用户输入的大纲文本（用于outline类型）
+    description_text = db.Column(db.Text, nullable=True)  # 用户输入的描述文本（用于description类型）
     extra_requirements = db.Column(db.Text, nullable=True)  # 额外要求，应用到每个页面的AI提示词
     creation_type = db.Column(db.String(20), nullable=False, default='idea')  # idea|outline|descriptions
     template_image_path = db.Column(db.String(500), nullable=True)
@@ -32,6 +34,8 @@ class Project(db.Model):
         data = {
             'project_id': self.id,
             'idea_prompt': self.idea_prompt,
+            'outline_text': self.outline_text,
+            'description_text': self.description_text,
             'extra_requirements': self.extra_requirements,
             'creation_type': self.creation_type,
             'template_image_url': f'/files/{self.id}/template/{self.template_image_path.split("/")[-1]}' if self.template_image_path else None,

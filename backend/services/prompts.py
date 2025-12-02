@@ -2,6 +2,7 @@
 AI Service Prompts - 集中管理所有 AI 服务的 prompt 模板
 """
 from textwrap import dedent
+from typing import List, Dict
 
 
 def get_outline_generation_prompt(idea_prompt: str) -> str:
@@ -175,6 +176,7 @@ def get_image_generation_prompt(page_desc: str, outline_text: str,
     利用专业平面设计知识，根据参考图片的色彩与风格生成一页设计风格相同的ppt页面，作为整个ppt的其中一页，内容是:
     {page_desc}（文字内容一致即可，表点符号、文字布局可以美化）
     
+    ---
     整个ppt的大纲为：
     {outline_text}
     
@@ -206,4 +208,118 @@ def get_image_edit_prompt(edit_instruction: str, original_description: str = Non
         """)
     else:
         return f"根据以下指令修改这张PPT页面：{edit_instruction}\n保持原有的内容结构和设计风格，只按照指令进行修改。"
+
+
+def get_description_to_outline_prompt(description_text: str) -> str:
+    """
+    从描述文本解析出大纲的 prompt
+    
+    Args:
+        description_text: 用户提供的完整页面描述文本
+        
+    Returns:
+        格式化后的 prompt 字符串
+    """
+    return dedent(f"""\
+    You are a helpful assistant that analyzes a user-provided PPT description text and extracts the outline structure from it.
+    
+    The user has provided the following description text:
+    
+    {description_text}
+    
+    Your task is to analyze this text and extract the outline structure (titles and key points) for each page.
+    You should identify:
+    1. How many pages are described
+    2. The title for each page
+    3. The key points or content structure for each page
+    
+    You can organize the content in two ways:
+    
+    1. Simple format (for short PPTs without major sections):
+    [{{"title": "title1", "points": ["point1", "point2"]}}, {{"title": "title2", "points": ["point1", "point2"]}}]
+    
+    2. Part-based format (for longer PPTs with major sections):
+    [
+      {{
+        "part": "Part 1: Introduction",
+        "pages": [
+          {{"title": "Welcome", "points": ["point1", "point2"]}},
+          {{"title": "Overview", "points": ["point1", "point2"]}}
+        ]
+      }},
+      {{
+        "part": "Part 2: Main Content",
+        "pages": [
+          {{"title": "Topic 1", "points": ["point1", "point2"]}},
+          {{"title": "Topic 2", "points": ["point1", "point2"]}}
+        ]
+      }}
+    ]
+    
+    Important rules:
+    - Extract the outline structure from the description text
+    - Identify page titles and key points
+    - If the text has clear sections/parts, use the part-based format
+    - Preserve the logical structure and organization from the original text
+    - The points should be concise summaries of the main content for each page
+    
+    Now extract the outline structure from the description text above. Return only the JSON, don't include any other text.
+    使用全中文输出。
+    """)
+
+
+def get_description_split_prompt(description_text: str, outline: List[Dict]) -> str:
+    """
+    从描述文本切分出每页描述的 prompt
+    
+    Args:
+        description_text: 用户提供的完整页面描述文本
+        outline: 已解析出的大纲结构
+        
+    Returns:
+        格式化后的 prompt 字符串
+    """
+    import json
+    outline_json = json.dumps(outline, ensure_ascii=False, indent=2)
+    
+    return dedent(f"""\
+    You are a helpful assistant that splits a complete PPT description text into individual page descriptions.
+    
+    The user has provided a complete description text:
+    
+    {description_text}
+    
+    We have already extracted the outline structure:
+    
+    {outline_json}
+    
+    Your task is to split the description text into individual page descriptions based on the outline structure.
+    For each page in the outline, extract the corresponding description from the original text.
+    
+    Return a JSON array where each element corresponds to a page in the outline (in the same order).
+    Each element should be a string containing the page description in the following format:
+    
+    页面标题：[页面标题]
+    页面文字：
+    - [要点1]
+    - [要点2]
+    ...
+    
+    Example output format:
+    [
+      "页面标题：人工智能的诞生\\n页面文字：\\n- 1950 年，图灵提出"图灵测试"...",
+      "页面标题：AI 的发展历程\\n页面文字：\\n- 1950年代：符号主义...",
+      ...
+    ]
+    
+    Important rules:
+    - Split the description text according to the outline structure
+    - Each page description should match the corresponding page in the outline
+    - Preserve all important content from the original text
+    - Keep the format consistent with the example above
+    - If a page in the outline doesn't have a clear description in the text, create a reasonable description based on the outline
+    
+    Now split the description text into individual page descriptions. Return only the JSON array, don't include any other text.
+    使用全中文输出。
+    """)
 

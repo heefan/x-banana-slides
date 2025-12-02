@@ -16,7 +16,9 @@ from .prompts import (
     get_outline_parsing_prompt,
     get_page_description_prompt,
     get_image_generation_prompt,
-    get_image_edit_prompt
+    get_image_edit_prompt,
+    get_description_to_outline_prompt,
+    get_description_split_prompt
 )
 
 
@@ -32,7 +34,7 @@ class AIService:
             ),
             api_key=api_key
         )
-        self.text_model = "gemini-2.5-pro"
+        self.text_model = "gemini-2.5-flash"
         self.image_model = "gemini-3-pro-image-preview"
     
     @staticmethod
@@ -366,4 +368,58 @@ class AIService:
             original_description=original_description
         )
         return self.generate_image(edit_instruction, current_image_path, aspect_ratio, resolution, additional_ref_images)
+    
+    def parse_description_to_outline(self, description_text: str) -> List[Dict]:
+        """
+        从描述文本解析出大纲结构
+        
+        Args:
+            description_text: 用户提供的完整页面描述文本
+        
+        Returns:
+            List of outline items (may contain parts with pages or direct pages)
+        """
+        parse_prompt = get_description_to_outline_prompt(description_text)
+        
+        response = self.client.models.generate_content(
+            model=self.text_model,
+            contents=parse_prompt,
+            config=types.GenerateContentConfig(
+                thinking_config=types.ThinkingConfig(thinking_budget=1000),
+            ),
+        )
+        
+        outline_json = response.text.strip().strip("```json").strip("```").strip()
+        outline = json.loads(outline_json)
+        return outline
+    
+    def parse_description_to_page_descriptions(self, description_text: str, outline: List[Dict]) -> List[str]:
+        """
+        从描述文本切分出每页描述
+        
+        Args:
+            description_text: 用户提供的完整页面描述文本
+            outline: 已解析出的大纲结构
+        
+        Returns:
+            List of page descriptions (strings), one for each page in the outline
+        """
+        split_prompt = get_description_split_prompt(description_text, outline)
+        
+        response = self.client.models.generate_content(
+            model=self.text_model,
+            contents=split_prompt,
+            config=types.GenerateContentConfig(
+                thinking_config=types.ThinkingConfig(thinking_budget=1000),
+            ),
+        )
+        
+        descriptions_json = response.text.strip().strip("```json").strip("```").strip()
+        descriptions = json.loads(descriptions_json)
+        
+        # 确保返回的是字符串列表
+        if isinstance(descriptions, list):
+            return [str(desc) for desc in descriptions]
+        else:
+            raise ValueError("Expected a list of page descriptions, but got: " + str(type(descriptions)))
 
