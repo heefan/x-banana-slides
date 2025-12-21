@@ -4,11 +4,14 @@ No need for Celery or Redis, uses in-memory task tracking
 """
 import logging
 import threading
+import json
+import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable, List, Dict, Any
 from datetime import datetime
 from models import db, Task, Page, Material
 from pathlib import Path
+from flask import current_app
 
 logger = logging.getLogger(__name__)
 
@@ -765,3 +768,175 @@ def generate_material_image_task(task_id: str, project_id: str, prompt: str,
                 temp_path = Path(temp_dir)
                 if temp_path.exists():
                     shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def export_pptx_with_segmentation_task(task_id: str, project_id: str, image_paths: List[str],
+                                       output_path: str, use_segmentation: bool = True,
+                                       max_workers: int = 2, timeout_per_page: int = 30,
+                                       app=None):
+    """
+    Background task for exporting PPTX with element segmentation
+    
+    Note: app instance MUST be passed from the request context
+    
+    Args:
+        task_id: Task ID
+        project_id: Project ID
+        image_paths: List of absolute paths to images
+        output_path: Output file path
+        use_segmentation: Whether to use element segmentation
+        max_workers: Maximum number of parallel workers (default: 2, to avoid API rate limits)
+        timeout_per_page: Timeout per page in seconds (default: 30)
+        app: Flask app instance
+    """
+    if app is None:
+        raise ValueError("Flask app instance must be provided")
+    
+    with app.app_context():
+        try:
+            # Update task status to PROCESSING
+            task = Task.query.get(task_id)
+            if not task:
+                logger.error(f"Task {task_id} not found")
+                return
+            
+            task.status = 'PROCESSING'
+            db.session.commit()
+            logger.info(f"Task {task_id} status updated to PROCESSING")
+            
+            # Initialize progress
+            task.set_progress({
+                "total": len(image_paths),
+                "completed": 0,
+                "failed": 0
+            })
+            db.session.commit()
+            
+            # Import services
+            from services import ExportService, ElementSegmentationService
+            
+            # Initialize segmentation service if needed
+            segmentation_service = None
+            if use_segmentation:
+                try:
+                    segmentation_service = ElementSegmentationService()
+                    logger.info("ElementSegmentationService initialized successfully")
+                except Exception as e:
+                    logger.warning(f"Failed to initialize segmentation: {e}, using simple export")
+                    use_segmentation = False
+            
+            # Process pages in parallel (with limited concurrency)
+            completed = 0
+            failed = 0
+            
+            def process_single_page(image_path: str):
+                """
+                Process a single page (segment and prepare for export)
+                Returns: (image_path, success, error_message)
+                """
+                if not use_segmentation or not segmentation_service:
+                    return (image_path, True, None)
+                
+                try:
+                    # Call segmentation (timeout is handled internally by the service)
+                    segmentation_service.segment_image(image_path)
+                    return (image_path, True, None)
+                    
+                except Exception as e:
+                    logger.warning(f"Error processing page {image_path}: {e}, will use simple export")
+                    return (image_path, True, None)  # Still success, will use simple export
+            
+            # Process pages in parallel (limited concurrency)
+            if len(image_paths) > 1 and use_segmentation:
+                from concurrent.futures import ThreadPoolExecutor, as_completed
+                
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    futures = {
+                        executor.submit(process_single_page, img_path): img_path
+                        for img_path in image_paths
+                    }
+                    
+                    for future in as_completed(futures):
+                        img_path = futures[future]
+                        try:
+                            _, success, error = future.result()
+                            if success:
+                                completed += 1
+                            else:
+                                failed += 1
+                        except Exception as e:
+                            logger.error(f"Error processing {img_path}: {e}")
+                            failed += 1
+                        
+                        # Update progress
+                        task = Task.query.get(task_id)
+                        if task:
+                            task.update_progress(completed=completed, failed=failed)
+                            db.session.commit()
+                            logger.info(f"Export Progress: {completed}/{len(image_paths)} pages processed")
+            else:
+                # Sequential processing (or no segmentation)
+                for img_path in image_paths:
+                    try:
+                        _, success, error = process_single_page(img_path)
+                        if success:
+                            completed += 1
+                        else:
+                            failed += 1
+                    except Exception as e:
+                        logger.error(f"Error processing {img_path}: {e}")
+                        failed += 1
+                    
+                    # Update progress
+                    task = Task.query.get(task_id)
+                    if task:
+                        task.update_progress(completed=completed, failed=failed)
+                        db.session.commit()
+                        logger.info(f"Export Progress: {completed}/{len(image_paths)} pages processed")
+            
+            # Now create the PPTX file
+            logger.info(f"Creating PPTX file with {len(image_paths)} pages...")
+            ExportService.create_pptx_with_segmented_elements(
+                image_paths=image_paths,
+                output_file=output_path,
+                use_segmentation=use_segmentation
+            )
+            
+            # Verify file was created
+            if not os.path.exists(output_path):
+                raise ValueError(f"PPTX file was not created: {output_path}")
+            
+            # Build download URLs
+            filename = os.path.basename(output_path)
+            download_path = f"/files/{project_id}/exports/{filename}"
+            
+            # Mark task as completed
+            task = Task.query.get(task_id)
+            if task:
+                task.status = 'COMPLETED'
+                task.completed_at = datetime.utcnow()
+                task.set_progress({
+                    "total": len(image_paths),
+                    "completed": completed,
+                    "failed": failed
+                })
+                # Store download URL in result
+                task.set_result({
+                    "download_url": download_path,
+                    "filename": filename
+                })
+                db.session.commit()
+                logger.info(f"Task {task_id} COMPLETED - PPTX exported: {output_path}")
+        
+        except Exception as e:
+            import traceback
+            error_detail = traceback.format_exc()
+            logger.error(f"Task {task_id} FAILED: {error_detail}")
+            
+            # Mark task as failed
+            task = Task.query.get(task_id)
+            if task:
+                task.status = 'FAILED'
+                task.error_message = str(e)
+                task.completed_at = datetime.utcnow()
+                db.session.commit()

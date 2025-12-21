@@ -2,9 +2,10 @@
 Export Controller - handles file export endpoints
 """
 from flask import Blueprint, request, current_app
-from models import db, Project, Page
+from models import db, Project, Page, Task
 from utils import error_response, not_found, bad_request, success_response
 from services import ExportService, FileService
+from services.task_manager import task_manager, export_pptx_with_segmentation_task
 import os
 import io
 
@@ -14,15 +15,18 @@ export_bp = Blueprint('export', __name__, url_prefix='/api/projects')
 @export_bp.route('/<project_id>/export/pptx', methods=['GET'])
 def export_pptx(project_id):
     """
-    GET /api/projects/{project_id}/export/pptx?filename=... - Export PPTX
+    GET /api/projects/{project_id}/export/pptx?filename=...&use_segmentation=true - Export PPTX (Async)
+    
+    Query Parameters:
+        filename: Optional filename (default: presentation_{project_id}.pptx)
+        use_segmentation: Whether to use element segmentation (default: true)
     
     Returns:
-        JSON with download URL, e.g.
+        JSON with task_id (202 Accepted), e.g.
         {
             "success": true,
             "data": {
-                "download_url": "/files/{project_id}/exports/xxx.pptx",
-                "download_url_absolute": "http://host:port/files/{project_id}/exports/xxx.pptx"
+                "task_id": "xxx-xxx-xxx"
             }
         }
     """
@@ -51,7 +55,6 @@ def export_pptx(project_id):
             return bad_request("No generated images found for project")
         
         # Determine export directory and filename
-        file_service = FileService(current_app.config['UPLOAD_FOLDER'])
         exports_dir = file_service._get_exports_dir(project_id)
         
         # Get filename from query params or use default
@@ -60,21 +63,41 @@ def export_pptx(project_id):
             filename += '.pptx'
 
         output_path = os.path.join(exports_dir, filename)
-
-        # Generate PPTX file on disk
-        ExportService.create_pptx_from_images(image_paths, output_file=output_path)
-
-        # Build download URLs
-        download_path = f"/files/{project_id}/exports/{filename}"
-        base_url = request.url_root.rstrip("/")
-        download_url_absolute = f"{base_url}{download_path}"
-
+        
+        # Get use_segmentation parameter (default: true)
+        use_segmentation = request.args.get('use_segmentation', 'true').lower() == 'true'
+        
+        # Create task
+        task = Task(
+            project_id=project_id,
+            task_type='EXPORT_PPTX',
+            status='PENDING'
+        )
+        task.set_progress({
+            'total': len(image_paths),
+            'completed': 0,
+            'failed': 0
+        })
+        db.session.add(task)
+        db.session.commit()
+        
+        # Submit background task
+        task_manager.submit_task(
+            task.id,
+            export_pptx_with_segmentation_task,
+            project_id,
+            image_paths,
+            output_path,
+            use_segmentation,
+            2,  # max_workers
+            30,  # timeout_per_page
+            current_app._get_current_object()  # Flask app instance
+        )
+        
         return success_response(
-            data={
-                "download_url": download_path,
-                "download_url_absolute": download_url_absolute,
-            },
-            message="Export PPTX task created"
+            data={'task_id': task.id},
+            message="Export PPTX task created",
+            status_code=202  # 202 Accepted
         )
     
     except Exception as e:

@@ -381,14 +381,28 @@ const debouncedUpdatePage = debounce(
 
         // 检查任务状态
         if (task.status === 'COMPLETED') {
-          console.log(`[轮询] Task ${taskId} 已完成，刷新项目数据`);
+          console.log(`[轮询] Task ${taskId} 已完成`);
+          
+          // 处理 EXPORT_PPTX 任务：自动下载
+          if (task.task_type === 'EXPORT_PPTX') {
+            const downloadUrl = task.result?.download_url;
+            if (downloadUrl) {
+              // 打开下载链接
+              window.open(downloadUrl, '_blank');
+              console.log(`[轮询] 已打开下载链接: ${downloadUrl}`);
+            } else {
+              console.warn('[轮询] EXPORT_PPTX 任务完成但没有下载链接');
+            }
+          } else {
+            // 其他任务类型：刷新项目数据
+            await get().syncProject();
+          }
+          
           set({ 
             activeTaskId: null, 
             taskProgress: null, 
             isGlobalLoading: false 
           });
-          // 刷新项目数据
-          await get().syncProject();
         } else if (task.status === 'FAILED') {
           console.error(`[轮询] Task ${taskId} 失败:`, task.error_message || task.error);
           set({ 
@@ -787,28 +801,28 @@ const debouncedUpdatePage = debounce(
     }
   },
 
-  // 导出PPTX
+  // 导出PPTX (异步)
   exportPPTX: async () => {
     const { currentProject } = get();
     if (!currentProject) return;
 
     set({ isGlobalLoading: true, error: null });
     try {
-      const response = await api.exportPPTX(currentProject.id);
-      // 优先使用相对路径，避免 Docker 环境下的端口问题
-      const downloadUrl =
-        response.data?.download_url || response.data?.download_url_absolute;
-
-      if (!downloadUrl) {
-        throw new Error('导出链接获取失败');
+      // 调用导出接口，获取 task_id
+      const response = await api.exportPPTX(currentProject.id, true); // use_segmentation=true
+      const taskId = response.data?.task_id;
+      
+      if (!taskId) {
+        throw new Error('导出任务创建失败');
       }
-
-      // 使用浏览器直接下载链接，避免 axios 受带宽和超时影响
-      window.open(downloadUrl, '_blank');
+      
+      // 设置活动任务，开始轮询
+      set({ activeTaskId: taskId });
+      
+      // 开始轮询任务状态
+      await get().pollTask(taskId);
     } catch (error: any) {
-      set({ error: error.message || '导出失败' });
-    } finally {
-      set({ isGlobalLoading: false });
+      set({ error: error.message || '导出失败', isGlobalLoading: false });
     }
   },
 

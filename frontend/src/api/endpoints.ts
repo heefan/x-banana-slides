@@ -406,14 +406,17 @@ export const getTaskStatus = async (projectId: string, taskId: string): Promise<
 // ===== 导出 =====
 
 /**
- * 导出为PPTX
+ * 导出为PPTX (异步)
  */
 export const exportPPTX = async (
-  projectId: string
-): Promise<ApiResponse<{ download_url: string; download_url_absolute?: string }>> => {
+  projectId: string,
+  useSegmentation: boolean = true
+): Promise<ApiResponse<{ task_id: string }>> => {
   const response = await apiClient.get<
-    ApiResponse<{ download_url: string; download_url_absolute?: string }>
-  >(`/api/projects/${projectId}/export/pptx`);
+    ApiResponse<{ task_id: string }>
+  >(`/api/projects/${projectId}/export/pptx`, {
+    params: { use_segmentation: useSegmentation }
+  });
   return response.data;
 };
 

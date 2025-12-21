@@ -18,6 +18,7 @@ class Task(db.Model):
     task_type = db.Column(db.String(50), nullable=False)  # GENERATE_DESCRIPTIONS|GENERATE_IMAGES
     status = db.Column(db.String(50), nullable=False, default='PENDING')
     progress = db.Column(db.Text, nullable=True)  # JSON string: {"total": 10, "completed": 5, "failed": 0}
+    result = db.Column(db.Text, nullable=True)  # JSON string: task result data
     error_message = db.Column(db.Text, nullable=True)
     created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
     completed_at = db.Column(db.DateTime, nullable=True)
@@ -50,6 +51,22 @@ class Task(db.Model):
             prog['failed'] = failed
         self.set_progress(prog)
     
+    def get_result(self):
+        """Parse result from JSON string"""
+        if self.result:
+            try:
+                return json.loads(self.result)
+            except json.JSONDecodeError:
+                return None
+        return None
+    
+    def set_result(self, data):
+        """Set result as JSON string"""
+        if data:
+            self.result = json.dumps(data)
+        else:
+            self.result = None
+    
     def to_dict(self):
         """Convert to dictionary"""
         return {
@@ -57,6 +74,7 @@ class Task(db.Model):
             'task_type': self.task_type,
             'status': self.status,
             'progress': self.get_progress(),
+            'result': self.get_result(),
             'error_message': self.error_message,
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'completed_at': self.completed_at.isoformat() if self.completed_at else None,

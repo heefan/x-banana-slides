@@ -46,4 +46,4 @@ generate-example.py
 *.pdf
 .cursor/worktrees.json
 uploads/
-!assets/*
+!assets/*__context__
