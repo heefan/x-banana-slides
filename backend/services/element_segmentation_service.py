@@ -11,6 +11,12 @@ from google.genai import types
 
 # Import private function for config (can be imported despite underscore)
 from services.ai_providers import _get_provider_config
+from services.segmentation import (
+    SegmentationPromptManager,
+    BackgroundHandler,
+    ResultProcessor,
+    BackgroundType
+)
 
 logger = logging.getLogger(__name__)
 
@@ -92,23 +98,45 @@ class ElementSegmentationService:
         except Exception as e:
             raise ValueError(f"Failed to load image {image_path}: {str(e)}") from e
         
-        # Identify elements with Vision API
-        elements_info = self._identify_elements_with_vision(image)
+        # Detect background type to select appropriate prompt
+        background_type_str = BackgroundHandler.detect_background_type(image)
+        logger.debug(f"Detected background type: {background_type_str}")
         
-        # Validate and clean elements
-        validated_elements = self._validate_and_clean_elements(
+        # Map string to BackgroundType enum
+        background_type_map = {
+            'simple': BackgroundType.SIMPLE,
+            'gradient': BackgroundType.GRADIENT,
+            'textured': BackgroundType.TEXTURED,
+            'complex': BackgroundType.COMPLEX
+        }
+        background_type = background_type_map.get(background_type_str, BackgroundType.COMPLEX)
+        
+        # Identify elements with Vision API (using appropriate prompt)
+        elements_info = self._identify_elements_with_vision(image, background_type)
+        
+        # Enhance background info if not provided
+        if not elements_info.get('background_info'):
+            elements_info['background_info'] = BackgroundHandler.analyze_background_info(image)
+        
+        # Validate and clean elements using ResultProcessor
+        validated_elements = ResultProcessor.validate_and_clean_elements(
             elements_info, 
             (image_width, image_height)
         )
         
         return validated_elements
     
-    def _identify_elements_with_vision(self, image: Image.Image) -> Dict:
+    def _identify_elements_with_vision(
+        self,
+        image: Image.Image,
+        background_type: Optional[BackgroundType] = None
+    ) -> Dict:
         """
         Call Gemini Vision API to identify elements
         
         Args:
             image: PIL Image object
+            background_type: Background type for prompt selection
             
         Returns:
             Raw elements info from Vision API
@@ -116,7 +144,8 @@ class ElementSegmentationService:
         Raises:
             Exception: If API call fails
         """
-        prompt = self._get_segmentation_prompt()
+        # Use prompt manager to get appropriate prompt
+        prompt = SegmentationPromptManager.get_prompt(background_type)
         
         try:
             logger.debug(f"Calling Vision API with model: {self.model}")
@@ -147,68 +176,6 @@ class ElementSegmentationService:
             logger.error(error_detail, exc_info=True)
             raise Exception(error_detail) from e
     
-    def _get_segmentation_prompt(self) -> str:
-        """Get the prompt for element segmentation"""
-        return """请仔细分析这张PPT幻灯片图片，识别其中的所有元素。
-
-要求：
-1. 识别所有文字内容，包括：
-   - 文字的具体内容
-   - 文字的位置（bounding box，格式：[x, y, width, height]，单位：像素）
-   - 估算的字体大小（像素）
-   - 字体粗细（bold 或 normal）
-
-2. 识别所有图标和图片元素，包括：
-   - 位置（bounding box）
-   - 简要描述
-
-3. 识别所有图表、图形元素，包括：
-   - 位置（bounding box）
-   - 类型描述（如：柱状图、饼图、流程图等）
-
-4. 分析背景信息：
-   - 是否有渐变
-   - 主要颜色
-
-请严格按照以下 JSON 格式返回结果，不要添加任何其他文字说明：
-
-{
-    "text_elements": [
-        {
-            "text": "文字内容",
-            "bbox": [x, y, width, height],
-            "font_size": 24,
-            "font_weight": "bold"
-        }
-    ],
-    "icons": [
-        {
-            "type": "icon",
-            "bbox": [x, y, width, height],
-            "description": "图标描述"
-        }
-    ],
-    "charts": [
-        {
-            "type": "chart",
-            "bbox": [x, y, width, height],
-            "description": "图表描述"
-        }
-    ],
-    "background_info": {
-        "has_gradient": false,
-        "main_color": "白色"
-    }
-}
-
-注意：
-- bbox 坐标从图片左上角 (0, 0) 开始
-- 格式为 [x, y, width, height]，其中：
-  - x, y: 左上角坐标（像素）
-  - width, height: 宽度和高度（像素）
-- 如果某个类别没有元素，返回空数组 []
-- 确保所有坐标都在图片范围内
-- 字体大小是估算值，基于文字在图片中的相对大小"""
     
     def _parse_json_response(self, response_text: str) -> Dict:
         """
@@ -247,81 +214,4 @@ class ElementSegmentationService:
             logger.error(f"Failed to parse JSON. Response preview: {cleaned[:200]}")
             raise ValueError(f"Failed to parse JSON from response: {cleaned[:200]}") from e
     
-    def _validate_and_clean_elements(self, elements_info: Dict, image_size: Tuple[int, int]) -> Dict:
-        """
-        Validate and clean element data
-        
-        Args:
-            elements_info: Raw elements info from Vision API
-            image_size: Image size (width, height)
-        
-        Returns:
-            Validated and cleaned elements info
-        """
-        image_width, image_height = image_size
-        validated = {
-            'text_elements': [],
-            'icons': [],
-            'charts': [],
-            'background_info': elements_info.get('background_info', {})
-        }
-        
-        # Validate text elements
-        for elem in elements_info.get('text_elements', []):
-            if self._is_valid_bbox(elem.get('bbox'), image_width, image_height):
-                validated['text_elements'].append(elem)
-            else:
-                logger.warning(f"Invalid text element bbox: {elem.get('bbox')}, image size: {image_width}x{image_height}")
-        
-        # Validate icons
-        for elem in elements_info.get('icons', []):
-            if self._is_valid_bbox(elem.get('bbox'), image_width, image_height):
-                validated['icons'].append(elem)
-            else:
-                logger.warning(f"Invalid icon bbox: {elem.get('bbox')}, image size: {image_width}x{image_height}")
-        
-        # Validate charts
-        for elem in elements_info.get('charts', []):
-            if self._is_valid_bbox(elem.get('bbox'), image_width, image_height):
-                validated['charts'].append(elem)
-            else:
-                logger.warning(f"Invalid chart bbox: {elem.get('bbox')}, image size: {image_width}x{image_height}")
-        
-        logger.info(f"Validated elements: {len(validated['text_elements'])} text, "
-                   f"{len(validated['icons'])} icons, {len(validated['charts'])} charts")
-        
-        return validated
-    
-    def _is_valid_bbox(self, bbox: List[float], image_width: int, image_height: int) -> bool:
-        """
-        Validate if bbox is valid
-        
-        Args:
-            bbox: [x, y, width, height]
-            image_width: Image width
-            image_height: Image height
-        
-        Returns:
-            True if bbox is valid
-        """
-        if not bbox or len(bbox) != 4:
-            return False
-        
-        try:
-            x, y, width, height = float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3])
-        except (ValueError, TypeError):
-            return False
-        
-        # Check width and height
-        if width <= 0 or height <= 0:
-            return False
-        
-        # Check coordinates are within image bounds
-        if x < 0 or y < 0:
-            return False
-        
-        if x + width > image_width or y + height > image_height:
-            return False
-        
-        return True
 

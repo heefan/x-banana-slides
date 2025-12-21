@@ -1,21 +1,50 @@
 """
 手动测试 ElementSegmentationService
 用于验证真实 Vision API 调用
+支持可视化输出
 """
 import os
 import sys
 import json
+import argparse
 from pathlib import Path
+from dotenv import load_dotenv
+
+# 加载 .env 文件（从项目根目录）
+_project_root = Path(__file__).parent.parent
+_env_file = _project_root / '.env'
+if _env_file.exists():
+    load_dotenv(dotenv_path=_env_file, override=True)
+    print(f"✓ 已加载 .env 文件: {_env_file}")
+else:
+    print(f"⚠️  .env 文件不存在: {_env_file}")
 
 # 添加 backend 到路径
 backend_path = Path(__file__).parent
 sys.path.insert(0, str(backend_path))
 
 from services.element_segmentation_service import ElementSegmentationService
+from tools.visualize_segmentation import SegmentationVisualizer
+from services.segmentation import ResultProcessor
 
 
-def test_segmentation(image_path: str):
-    """测试元素分割服务"""
+def test_segmentation(
+    image_path: str,
+    visualize: bool = True,
+    comparison: bool = False,
+    output_dir: str = None,
+    show_stats: bool = True
+):
+    """
+    测试元素分割服务
+    
+    Args:
+        image_path: 图片路径
+        visualize: 是否生成可视化图片
+        comparison: 是否生成对比图（原图 vs 标注图）
+        output_dir: 输出目录（默认与图片同目录）
+        show_stats: 是否显示统计信息
+    """
     print(f"\n{'='*60}")
     print(f"测试图片: {image_path}")
     print(f"{'='*60}\n")
@@ -38,12 +67,17 @@ def test_segmentation(image_path: str):
         elements = service.segment_image(image_path)
         print("   ✓ 元素识别成功")
         
-        # 打印结果
-        print("\n3. 识别结果:")
-        print(f"   - 文字元素: {len(elements.get('text_elements', []))} 个")
-        print(f"   - 图标: {len(elements.get('icons', []))} 个")
-        print(f"   - 图表: {len(elements.get('charts', []))} 个")
-        print(f"   - 背景信息: {elements.get('background_info', {})}")
+        # 显示统计信息
+        if show_stats:
+            stats = ResultProcessor.get_statistics(elements)
+            print("\n3. 识别结果统计:")
+            print(f"   - 文字元素: {stats['total_text_elements']} 个")
+            print(f"   - 图标: {stats['total_icons']} 个")
+            print(f"   - 图表: {stats['total_charts']} 个")
+            print(f"   - 总元素数: {stats['total_elements']} 个")
+            print(f"   - 有内容的文字元素: {stats['text_elements_with_content']} 个")
+            print(f"   - 平均文字长度: {stats['average_text_length']:.1f} 字符")
+            print(f"   - 背景信息: {elements.get('background_info', {})}")
         
         # 打印前几个文字元素
         text_elements = elements.get('text_elements', [])
@@ -78,11 +112,36 @@ def test_segmentation(image_path: str):
                 print(f"   {i}. 描述: {desc}")
                 print(f"      位置: {bbox}")
         
-        # 保存完整结果到 JSON 文件（可选）
-        output_file = image_path.replace('.png', '_elements.json').replace('.jpg', '_elements.json')
-        with open(output_file, 'w', encoding='utf-8') as f:
+        # 确定输出目录
+        if output_dir:
+            output_path_base = Path(output_dir)
+        else:
+            # 默认保存到图片所在目录的 segmentation_results 子文件夹
+            output_path_base = Path(image_path).parent / 'segmentation_results'
+        
+        # 创建输出目录（如果不存在）
+        output_path_base.mkdir(parents=True, exist_ok=True)
+        print(f"\n📁 输出目录: {output_path_base}")
+        
+        # 保存完整结果到 JSON 文件
+        json_output = output_path_base / f"{Path(image_path).stem}_elements.json"
+        with open(json_output, 'w', encoding='utf-8') as f:
             json.dump(elements, f, ensure_ascii=False, indent=2)
-        print(f"\n7. 完整结果已保存到: {output_file}")
+        print(f"\n7. 完整结果已保存到: {json_output}")
+        
+        # 生成可视化图片
+        if visualize:
+            print("\n8. 生成可视化图片...")
+            visualizer = SegmentationVisualizer()
+            
+            if comparison:
+                vis_output = output_path_base / f"{Path(image_path).stem}_comparison.png"
+                visualizer.create_comparison(str(image_path), elements, str(vis_output))
+                print(f"   ✓ 对比图已保存到: {vis_output}")
+            else:
+                vis_output = output_path_base / f"{Path(image_path).stem}_visualized.png"
+                visualizer.visualize(str(image_path), elements, str(vis_output), show_labels=True)
+                print(f"   ✓ 可视化图片已保存到: {vis_output}")
         
         print(f"\n{'='*60}")
         print("✓ 测试完成")
@@ -102,9 +161,42 @@ def test_segmentation(image_path: str):
 
 
 if __name__ == '__main__':
-    # 使用项目中的实际图片测试
-    if len(sys.argv) > 1:
-        test_image = sys.argv[1]
+    parser = argparse.ArgumentParser(
+        description='测试元素分割服务，支持可视化输出'
+    )
+    parser.add_argument(
+        'image',
+        nargs='?',
+        type=str,
+        help='图片路径'
+    )
+    parser.add_argument(
+        '--no-visualize',
+        action='store_true',
+        help='不生成可视化图片'
+    )
+    parser.add_argument(
+        '--comparison',
+        action='store_true',
+        help='生成对比图（原图 vs 标注图）'
+    )
+    parser.add_argument(
+        '--output-dir',
+        type=str,
+        default=None,
+        help='输出目录（默认与图片同目录）'
+    )
+    parser.add_argument(
+        '--no-stats',
+        action='store_true',
+        help='不显示统计信息'
+    )
+    
+    args = parser.parse_args()
+    
+    # 确定测试图片
+    if args.image:
+        test_image = args.image
     else:
         # 尝试查找项目中的图片
         uploads_dir = Path(__file__).parent.parent / 'uploads'
@@ -126,11 +218,24 @@ if __name__ == '__main__':
             test_image = None
     
     if not test_image:
-        print("用法: python test_segmentation_manual.py <图片路径>")
+        print("用法: python test_segmentation_manual.py <图片路径> [选项]")
         print("\n示例:")
         print("  python test_segmentation_manual.py ../uploads/xxx/pages/slide_01.png")
+        print("  python test_segmentation_manual.py image.png --comparison")
+        print("  python test_segmentation_manual.py image.png --output-dir ./output")
+        print("\n选项:")
+        print("  --no-visualize    不生成可视化图片")
+        print("  --comparison      生成对比图（原图 vs 标注图）")
+        print("  --output-dir DIR  指定输出目录")
+        print("  --no-stats        不显示统计信息")
         print("\n或者直接运行，会自动查找项目中的图片")
         sys.exit(1)
     
-    test_segmentation(test_image)
+    test_segmentation(
+        test_image,
+        visualize=not args.no_visualize,
+        comparison=args.comparison,
+        output_dir=args.output_dir,
+        show_stats=not args.no_stats
+    )
 
